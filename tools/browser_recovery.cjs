@@ -20,7 +20,7 @@ const { chromium } = require('playwright');
         await page.goto(`http://127.0.0.1:8079/pos/ui/${fixture.config}?debug=assets`);
         await page.getByText('Unlock Register', {exact: true}).click({timeout: 30000});
         await page.getByText(fixture.product_name, {exact: true}).first().click();
-        await page.getByRole('button', {name: 'DESCUENTO COLABORADOR', exact: true}).click();
+        await page.getByRole('button', {name: 'Dscto. Colaborador', exact: true}).click();
         await page.locator('#alvina-dni').fill(fixture.dni);
         await page.getByRole('button', {name: 'Consultar', exact: true}).click();
         await page.locator('.modal dd').last().waitFor();

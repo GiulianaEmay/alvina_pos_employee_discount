@@ -1,6 +1,15 @@
-# Validación funcional — 19.0.1.1.0
+# Validación funcional y visual
 
 Revisión local del 30 de octubre de 2026, sobre la entrega inicial del addon.
+
+## Ajuste visual — 19.0.1.1.1
+
+El botón se renombró a **Dscto. Colaborador**, con fuente de 14 px y texto en una
+sola línea. En Chromium a 1366 × 600 se comprobó un tamaño de 141 × 49 px,
+alineado con la altura de 49 px del control nativo, sin recorte ni desbordamiento.
+La venta real mediante el botón renombrado también pasó: S/ 100 − S/ 15 = S/ 85.
+Las pruebas funcionales detalladas abajo corresponden a la revisión 19.0.1.1.0;
+el ajuste visual conserva esa lógica.
 
 ## Entorno verificado
 

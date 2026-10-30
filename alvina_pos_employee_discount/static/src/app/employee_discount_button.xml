@@ -1,7 +1,7 @@
 <templates xml:space="preserve">
     <t t-name="alvina.ControlButtons" t-inherit="point_of_sale.ControlButtons" t-inherit-mode="extension">
         <xpath expr="//SelectPartnerButton" position="after">
-            <button t-if="pos.config.alvina_discount_enabled and !props.showRemainingButtons" class="btn btn-secondary btn-lg alvina-benefit-button" t-on-click="alvinaDiscount">DESCUENTO COLABORADOR</button>
+            <button t-if="pos.config.alvina_discount_enabled and !props.showRemainingButtons" class="btn btn-secondary alvina-benefit-button" title="Descuento de colaboradores" t-on-click="alvinaDiscount">Dscto. Colaborador</button>
         </xpath>
     </t>
 </templates>
