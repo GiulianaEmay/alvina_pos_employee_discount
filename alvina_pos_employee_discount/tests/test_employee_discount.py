@@ -345,3 +345,209 @@ class TestEmployeeDiscount(AccountTestInvoicingCommon):
         self.pay(refund)
         self.assertEqual(entry.reversed_amount, 30)
         self.assertEqual(self.ledger._usage(self.employee, self.ledger._week()), Decimal('30'))
+
+    def test_confirmed_marker_cannot_be_forged_or_cleared(self):
+        order = self.order()
+        order.write({'alvina_confirmed': True})
+        self.assertFalse(order.alvina_confirmed)
+        self.reserve(order)
+        self.pay(order)
+        self.assertTrue(order.alvina_confirmed)
+        order.write({'alvina_confirmed': False})
+        self.assertTrue(order.alvina_confirmed)
+
+    def test_new_paid_refund_through_real_sync_restores_once(self):
+        order = self.order()
+        self.reserve(order)
+        entry = self.pay(order)
+        refund_uuid = str(uuid4())
+        payload = {
+            'session_id': self.session.id, 'uuid': refund_uuid, 'state': 'paid',
+            'amount_total': -85, 'amount_paid': -85, 'amount_tax': 0, 'amount_return': 0,
+            'lines': [Command.create({
+                'uuid': str(uuid4()), 'product_id': self.product.id, 'qty': -1,
+                'price_unit': 100, 'discount': 15, 'price_subtotal': -85,
+                'price_subtotal_incl': -85, 'refunded_orderline_id': order.lines.id,
+                'tax_ids': [Command.clear()],
+            })],
+            'payment_ids': [Command.create({
+                'uuid': str(uuid4()), 'amount': -85, 'payment_method_id': self.payment_method.id,
+                'payment_date': fields.Datetime.to_string(fields.Datetime.now()),
+            })],
+        }
+        self.env['pos.order'].sync_from_ui([payload])
+        self.assertEqual(entry.reversed_amount, 15)
+        refund = self.env['pos.order'].search([('uuid', '=', refund_uuid)])
+        self.assertEqual(refund.state, 'paid')
+        self.env['pos.order'].sync_from_ui([{'uuid': refund_uuid, 'session_id': self.session.id, 'lines': []}])
+        self.assertEqual(entry.reversed_amount, 15)
+        with self.assertRaises(UserError):
+            refund.lines.write({'qty': -0.5})
+        with self.assertRaises(UserError):
+            refund.write({'amount_total': -40})
+
+    def test_release_then_change_employee_preserves_history(self):
+        other_dni = str(int(self.dni) - 1)
+        other = self.env['hr.employee'].create({
+            'name': 'Segundo colaborador', 'identification_id': other_dni,
+            'alvina_discount_authorized': True,
+        })
+        order = self.order()
+        self.reserve(order)
+        self.env['pos.order'].alvina_release(order.uuid)
+        order.write({'alvina_operation': False, 'alvina_amount': 0})
+        order.lines.discount = 0
+        self.assertEqual(self.env['pos.order'].alvina_lookup(order.uuid, other_dni)['amount'], 15)
+        result = self.env['pos.order'].alvina_reserve(order.uuid, other_dni, True)
+        order.write({'alvina_operation': result['operation']})
+        order.lines.discount = result['effective_rate']
+        self.pay(order)
+        attempts = self.ledger.search([('order_id', '=', order.id)])
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(attempts.filtered(lambda row: row.employee_id == self.employee).state, 'cancelled')
+        self.assertEqual(self.ledger._usage(self.employee, self.ledger._week()), 0)
+        self.assertEqual(self.ledger._usage(other, self.ledger._week()), 15)
+
+    def test_expired_discount_can_be_renewed_without_removing_cart(self):
+        with freeze_time('2026-10-30 15:00:00'):
+            order = self.order()
+            self.reserve(order)
+        with freeze_time('2026-10-30 15:11:00'):
+            self.assertEqual(self.env['pos.order'].alvina_lookup(order.uuid, self.dni)['amount'], 15)
+            self.reserve(order)
+            self.pay(order)
+            self.assertEqual(order.alvina_amount, 15)
+
+    def test_refund_with_changed_fiscal_position_does_not_restore(self):
+        order = self.order()
+        self.reserve(order)
+        entry = self.pay(order)
+        refund = self.order(-100)
+        refund.lines.write({'qty': -1, 'price_unit': 100, 'discount': 15,
+                            'refunded_orderline_id': order.lines.id})
+        refund.fiscal_position_id = self.fiscal_pos_a
+        refund._compute_prices()
+        self.pay(refund)
+        self.assertEqual(entry.reversed_amount, 0)
+
+    def test_report_balance_does_not_lock_or_mutate_expired_entries(self):
+        from unittest.mock import patch
+        with freeze_time('2026-10-30 15:00:00'):
+            order = self.order()
+            self.reserve(order)
+            entry = self.ledger.search([('order_id', '=', order.id)])
+        with freeze_time('2026-10-30 15:11:00'):
+            with patch.object(type(self.ledger), '_lock_employee', side_effect=AssertionError('Reports must not lock')):
+                entry.invalidate_recordset(['balance'])
+                self.assertEqual(entry.balance, 100)
+            self.assertEqual(entry.state, 'reserved')
+
+    def test_policy_rejects_invalid_or_fractional_cent_limits(self):
+        parameter = self.env['ir.config_parameter'].sudo()
+        for raw in ('NaN', 'Infinity', 'invalid', '0', '100.001', '30.001'):
+            parameter.set_param('alvina.weekly_limit', raw)
+            with self.assertRaises(UserError):
+                self.ledger._policy()
+        parameter.set_param('alvina.weekly_limit', '30.01')
+        self.assertEqual(self.ledger._policy()[1], Decimal('30.01'))
+
+    def test_settings_reject_fractional_cent_limit(self):
+        with self.assertRaises(ValidationError), self.cr.savepoint():
+            self.env['res.config.settings'].create({'alvina_weekly_limit': 30.001})
+
+    def test_standard_session_closure_with_benefit(self):
+        order = self.order(200)
+        self.reserve(order)
+        self.pay(order)
+        self.session.action_pos_session_closing_control()
+        self.assertEqual(self.session.state, 'closed')
+        self.assertEqual(order.state, 'done')
+        self.assertAlmostEqual(sum(self.session.move_id.line_ids.mapped('balance')), 0, places=2)
+        self.assertEqual(self.ledger._usage(self.employee, self.ledger._week()), Decimal('30'))
+
+    def test_odoo_rejects_tax_definition_change_during_open_pos(self):
+        tax = self.env['account.tax'].create({'name': 'IGV mutable', 'amount': 18, 'amount_type': 'percent'})
+        order = self.order(100, taxes=tax)
+        self.reserve(order)
+        with self.assertRaises(UserError):
+            tax.amount = 18.01
+        self.assertEqual(tax.amount, 18)
+        self.assertTrue(order._alvina_validate_reservation())
+
+    def test_upgrade_backfills_confirmed_only_from_consumed_ledger(self):
+        import importlib.util
+        from pathlib import Path
+        order = self.order()
+        self.reserve(order)
+        self.pay(order)
+        draft = self.order()
+        self.env.flush_all()
+        self.cr.execute('UPDATE pos_order SET alvina_confirmed = FALSE WHERE id = %s', [order.id])
+        module_path = Path(__file__).resolve().parents[1] / 'migrations/19.0.1.1.0/post-migrate.py'
+        spec = importlib.util.spec_from_file_location('alvina_confirmation_migration', module_path)
+        migration = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(migration)
+        migration.migrate(self.cr, '19.0.1.0.0')
+        (order | draft).invalidate_recordset(['alvina_confirmed'])
+        self.assertTrue(order.alvina_confirmed)
+        self.assertFalse(draft.alvina_confirmed)
+
+    def test_paid_benefit_fiscal_position_is_immutable(self):
+        order = self.order()
+        self.reserve(order)
+        self.pay(order)
+        with self.assertRaises(UserError):
+            order.write({'fiscal_position_id': self.fiscal_pos_a.id})
+
+    def test_context_defaults_cannot_add_lines_to_confirmed_benefit(self):
+        order = self.order()
+        self.reserve(order)
+        self.pay(order)
+        with self.assertRaises(UserError), self.cr.savepoint():
+            self.env['pos.order.line'].with_context(default_order_id=order.id).create({
+                'name': 'Línea adicional',
+                'product_id': self.product.id, 'qty': 1, 'price_unit': 100,
+                'price_subtotal': 100, 'price_subtotal_incl': 100,
+                'tax_ids': [Command.clear()],
+            })
+
+    def test_capped_invoice_matches_pos_payment(self):
+        previous = self.order(600)
+        self.reserve(previous)
+        self.pay(previous)  # S/ 90 used, S/ 10 left.
+        order = self.order(300)
+        order.partner_id = self.partner_a
+        self.assertEqual(self.reserve(order)['amount'], 10)
+        self.pay(order)
+        self.assertEqual(order.amount_total, 290)
+        order._generate_pos_order_invoice()
+        self.assertEqual(order.account_move.amount_total, order.amount_total)
+        self.assertAlmostEqual(sum(order.account_move.line_ids.mapped('balance')), 0, places=2)
+        self.assertEqual(self.ledger._usage(self.employee, self.ledger._week()), Decimal('100'))
+
+    def test_capped_tax_invoice_and_refund_match_payment(self):
+        previous = self.order(600)
+        self.reserve(previous)
+        self.pay(previous)
+        tax = self.env['account.tax'].create({'name': 'IGV cupo parcial', 'amount': 18, 'amount_type': 'percent'})
+        order = self.order(300, taxes=tax)
+        order.lines.qty = 3
+        order.partner_id = self.partner_a
+        order._compute_prices()
+        self.assertEqual(self.reserve(order)['amount'], 10)
+        self.pay(order)
+        self.assertEqual(order.amount_total, 1052)
+        order._generate_pos_order_invoice()
+        self.assertEqual(order.account_move.amount_total, 1052)
+        refund = self.order(-900, taxes=tax)
+        refund.partner_id = self.partner_a
+        refund.lines.write({'qty': -3, 'price_unit': 300, 'discount': order.lines.discount,
+                            'refunded_orderline_id': order.lines.id})
+        refund._compute_prices()
+        self.assertEqual(refund.amount_total, -1052)
+        self.pay(refund)
+        refund._generate_pos_order_invoice()
+        self.assertEqual(refund.account_move.move_type, 'out_refund')
+        self.assertEqual(refund.account_move.amount_total, 1052)
+        self.assertAlmostEqual(sum(refund.account_move.line_ids.mapped('balance')), 0, places=2)
+        self.assertEqual(self.ledger._usage(self.employee, self.ledger._week()), Decimal('90'))

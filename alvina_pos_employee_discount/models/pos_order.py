@@ -13,6 +13,7 @@ class PosOrder(models.Model):
 
     # No employee relation or DNI is ever loaded into the POS dataset.
     alvina_operation = fields.Char(copy=False)
+    alvina_confirmed = fields.Boolean(copy=False, readonly=True)
     alvina_amount = fields.Monetary(copy=False)
     alvina_original_total = fields.Monetary(copy=False)
 
@@ -93,7 +94,9 @@ class PosOrder(models.Model):
         # Nonstandard pricelists may embed promotions without a discount field.
         if self.pricelist_id and self.pricelist_id.item_ids:
             raise UserError(_('El beneficio no se acumula con reglas de listas de precios.'))
-        expected = previous.effective_rate if previous and previous.state == 'reserved' else 0
+        expected = (previous.effective_rate if previous
+                    and previous.state in ('reserved', 'expired')
+                    and self.alvina_operation == self.uuid else 0)
         if not (all(abs(line.discount) < 1e-8 for line in self.lines)
                 or all(abs(line.discount - expected) < 1e-8 for line in self.lines)):
             raise UserError(_('Retire los descuentos adicionales antes de aplicar el beneficio.'))
@@ -127,15 +130,24 @@ class PosOrder(models.Model):
             raise UserError(_('No es posible aplicar un descuento con la precisión de esta compra.'))
         return original, amount, effective
 
+    def _alvina_lock_attempt(self, employee):
+        ledger = self.env['alvina.employee.discount'].sudo()
+        entry = ledger.search([('operation', '=', self.uuid)], limit=1)
+        for candidate in (employee | entry.employee_id).sorted('id'):
+            ledger._lock_employee(candidate)
+        entry.invalidate_recordset()
+        if entry and entry.state == 'reserved' and entry.expires_at <= fields.Datetime.now():
+            entry.write({'state': 'expired'})
+        if entry and entry.employee_id != employee and entry.state not in ('cancelled', 'expired'):
+            raise UserError(_('Retire el beneficio antes de cambiar de colaborador.'))
+        return entry
+
     @api.model
     def alvina_lookup(self, uuid, dni):
         order = self._alvina_find_order(uuid)
         employee = order._alvina_employee(dni)
         ledger = self.env['alvina.employee.discount'].sudo()
-        ledger._lock_employee(employee)
-        existing = ledger.search([('operation', '=', uuid)], limit=1)
-        if existing and existing.employee_id != employee:
-            raise UserError(_('Retire el beneficio antes de cambiar de colaborador.'))
+        existing = order._alvina_lock_attempt(employee)
         week = ledger._week()
         used = ledger._usage(employee, week, existing)
         rate, limit = ledger._policy()
@@ -152,13 +164,19 @@ class PosOrder(models.Model):
         order = self._alvina_find_order(uuid)
         employee = order._alvina_employee(dni)
         ledger = self.env['alvina.employee.discount'].sudo()
-        ledger._lock_employee(employee)
+        entry = order._alvina_lock_attempt(employee)
         employee.invalidate_recordset()
         if not employee.active or not employee.alvina_discount_authorized:
             raise UserError(_('El colaborador ya no está autorizado.'))
-        entry = ledger.search([('operation', '=', uuid)], limit=1)
-        if entry and (entry.employee_id != employee or entry.state == 'consumed'):
+        if entry and entry.state == 'consumed':
             raise UserError(_('Esta operación ya pertenece a otro beneficio o ya fue confirmada.'))
+        if entry and entry.employee_id != employee:
+            if order.alvina_operation or any(line.discount for line in order.lines):
+                raise UserError(_('Retire el beneficio anterior antes de cambiar de colaborador.'))
+            # Keep the cancelled attempt auditable instead of rewriting its employee.
+            entry.write({'operation': '%s:%s' % (uuid, entry.id)})
+            entry.flush_recordset(['operation'])
+            entry = ledger.browse()
         week = ledger._week()
         used = ledger._usage(employee, week, entry)
         policy_rate, limit = ledger._policy()
@@ -195,7 +213,7 @@ class PosOrder(models.Model):
         entry = self.env['alvina.employee.discount'].sudo().search([
             ('order_id', '=', order.id), ('state', '=', 'consumed')], limit=1)
         return {'confirmed': bool(entry and order.state in ('paid', 'done', 'invoiced')),
-                'id': order.id}
+                'id': order.id, 'state': order.state}
 
     @api.model
     def alvina_validate(self, uuid):
@@ -232,23 +250,45 @@ class PosOrder(models.Model):
         amount = self.currency_id.round(original - self._alvina_total(entry.effective_rate))
         rate, policy_limit = ledger._policy()
         cap = min(limit - used, Decimal(str(original)) * rate / 100)
-        if (self.currency_id.compare_amounts(amount, entry.amount)
+        if (self.currency_id.compare_amounts(original, entry.original_total)
+                or self.currency_id.compare_amounts(amount, entry.amount)
                 or Decimal(str(amount)) > Decimal(str(self.currency_id.round(float(cap))))):
             raise UserError(_('El saldo semanal o el importe fiscal cambió. Reaplique el beneficio.'))
         return entry
 
+    @api.model
+    def _get_invoice_lines_values(self, line_values, pos_line, move_type):
+        values = super()._get_invoice_lines_values(line_values, pos_line, move_type)
+        benefit = (pos_line.order_id.alvina_confirmed
+                   or pos_line.refunded_orderline_id.order_id.alvina_confirmed)
+        if benefit and 'discount' in values and 'price_unit' in values:
+            rate = Decimal(str(values['discount']))
+            digits = self.env['decimal.precision'].precision_get('Discount')
+            if rate != rate.quantize(Decimal(1).scaleb(-digits)):
+                # POS discounts retain full precision; account.move.line.discount
+                # rounds to the configured Discount precision (normally 2). Fold
+                # an unrepresentable rate into the net unit price, whose standard
+                # Odoo 19 field keeps precision. Taxes and payment totals stay equal.
+                values['price_unit'] = float(Decimal(str(values['price_unit'])) * (1 - rate / 100))
+                values['discount'] = 0.0
+                values['name'] += '\n' + _('Descuento Colaborador incluido en el precio neto')
+        return values
+
     @api.model_create_multi
     def create(self, vals_list):
+        vals_list = [dict(vals, alvina_confirmed=False) for vals in vals_list]
         for vals in vals_list:
             if vals.get('alvina_operation') and vals.get('state', 'draft') != 'draft':
                 raise UserError(_('El beneficio requiere un pedido borrador y una reserva previa.'))
         return super().create(vals_list)
 
     def write(self, vals):
+        vals = {key: value for key, value in vals.items() if key != 'alvina_confirmed'}
         financial_fields = {'lines', 'uuid', 'session_id', 'company_id', 'currency_id',
+                            'fiscal_position_id', 'pricelist_id',
                             'alvina_operation', 'alvina_amount', 'alvina_original_total',
                             'amount_total', 'amount_tax'}
-        for order in self.filtered(lambda record: record.alvina_operation and record.state in ('paid', 'done', 'invoiced')):
+        for order in self._alvina_frozen_orders():
             if any(key in financial_fields and vals[key] != order[key] for key in vals):
                 raise UserError(_('Una venta con beneficio confirmado solo se corrige con una devolución.'))
         if vals.get('state') in ('done', 'invoiced'):
@@ -262,12 +302,26 @@ class PosOrder(models.Model):
             if entry:
                 super(PosOrder, order).write({
                     'alvina_amount': entry.amount, 'alvina_original_total': entry.original_total,
+                    'alvina_confirmed': True,
                 })
                 entry.write({'state': 'consumed', 'confirmed_at': fields.Datetime.now()})
             order._alvina_reverse_refunds()
         if vals.get('state') == 'cancel':
             self.env['alvina.employee.discount'].sudo().search([
                 ('order_id', 'in', self.ids), ('state', '=', 'reserved')])._release()
+        return result
+
+    def _alvina_frozen_orders(self):
+        settled = self.filtered(lambda order: order.state in ('paid', 'done', 'invoiced'))
+        reversed_orders = self.env['alvina.employee.discount.reversal'].sudo().search([
+            ('refund_order_id', 'in', settled.ids)]).refund_order_id
+        return settled.filtered(lambda order: order.alvina_operation or order.id in reversed_orders.ids)
+
+    def action_pos_order_paid(self):
+        result = super().action_pos_order_paid()
+        # New standard refunds arrive already in state=paid through sync_from_ui.
+        # Do not rely solely on a draft-to-paid write for their idempotent reversal.
+        self._alvina_reverse_refunds()
         return result
 
     def _alvina_reverse_refunds(self):
@@ -299,7 +353,10 @@ class PosOrder(models.Model):
                     r.qty < 0 and r.product_id == line.product_id
                     and abs(r.price_unit - line.price_unit) < 1e-8
                     and abs(r.discount - line.discount) < 1e-8
-                    and r.tax_ids == line.tax_ids))
+                    and r.product_uom_id == line.product_uom_id
+                    and r.order_id.currency_id == original.currency_id
+                    and r.order_id.fiscal_position_id == original.fiscal_position_id
+                    and r.tax_ids_after_fiscal_position == line.tax_ids_after_fiscal_position))
                 qty = min(line.qty, -sum(valid.mapped('qty')))
                 fully_refunded = fully_refunded and qty >= line.qty
                 if line.qty > 0:
@@ -321,14 +378,16 @@ class PosOrderLine(models.Model):
     _inherit = 'pos.order.line'
 
     def _alvina_check_frozen(self):
-        if any(order.alvina_operation and order.state in ('paid', 'done', 'invoiced')
-               for order in self.order_id):
+        if self.order_id._alvina_frozen_orders():
             raise UserError(_('No se pueden modificar productos de una venta con beneficio confirmado.'))
 
     def write(self, vals):
         if {'qty', 'price_unit', 'discount', 'tax_ids', 'product_id', 'order_id',
-            'price_subtotal', 'price_subtotal_incl', 'extra_tax_data'} & vals.keys():
+            'price_subtotal', 'price_subtotal_incl', 'extra_tax_data',
+            'product_uom_id', 'refunded_orderline_id'} & vals.keys():
             self._alvina_check_frozen()
+            if vals.get('order_id') and self.env['pos.order'].browse(vals['order_id'])._alvina_frozen_orders():
+                raise UserError(_('No se pueden agregar productos a una venta o devolución confirmada con beneficio.'))
         return super().write(vals)
 
     def unlink(self):
@@ -337,5 +396,11 @@ class PosOrderLine(models.Model):
 
     @api.model_create_multi
     def create(self, vals_list):
-        self.env['pos.order'].browse([vals['order_id'] for vals in vals_list if vals.get('order_id')]).lines._alvina_check_frozen()
-        return super().create(vals_list)
+        default_order = self.env.context.get('default_order_id')
+        targets = self.env['pos.order'].browse([vals.get('order_id', default_order) for vals in vals_list if vals.get('order_id', default_order)])
+        if targets._alvina_frozen_orders():
+            raise UserError(_('No se pueden agregar productos a una venta o devolución confirmada con beneficio.'))
+        records = super().create(vals_list)
+        # Defaults supplied in RPC context can fill order_id after our pre-check.
+        records._alvina_check_frozen()
+        return records

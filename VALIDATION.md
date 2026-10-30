@@ -1,6 +1,6 @@
-# Validación de la entrega
+# Validación funcional — 19.0.1.1.0
 
-Ejecución local del 30 de octubre de 2026. Addon creado desde un repositorio sin commits.
+Revisión local del 30 de octubre de 2026, sobre la entrega inicial del addon.
 
 ## Entorno verificado
 
@@ -12,15 +12,34 @@ Ejecución local del 30 de octubre de 2026. Addon creado desde un repositorio si
 - PostgreSQL por socket local; Odoo HTTP limitado a loopback. Sin credenciales
   reales de ALVIÑA ni acceso a una instancia de producción.
 
+## Correcciones de operación continua
+
+- Los pagos cuya respuesta se pierde se guardan inmediatamente en IndexedDB. El
+  ID numérico del borrador ya no se toma como prueba de pago confirmado.
+- La confirmación la establece exclusivamente el servidor; se migran los consumos
+  anteriores. La recuperación consulta el estado antes de volver a cobrar y bloquea
+  cambios de productos/pagos mientras el resultado siga incierto.
+- Las devoluciones nuevas que el POS envía directamente como pagadas ahora reponen
+  el consumo original. Se valida su contexto fiscal y se protege lo ya revertido.
+- Se permite cambiar de colaborador tras retirar el beneficio, conservando historial,
+  y renovar una reserva vencida en línea. Sincronizaciones simultáneas se serializan.
+- Se evita la discrepancia entre POS y factura por porcentajes de cupo parcial que
+  superan la precisión contable. Se prueban factura y nota de crédito con IGV y
+  cantidades múltiples; no se modifica la precisión global de Odoo.
+- Leer auditoría no bloquea cajas ni escribe estados. Cupos con fracciones de céntimo
+  o valores no finitos/corruptos se rechazan. También se bloquean modificaciones
+  fiscales posteriores y adición de líneas mediante valores por defecto de RPC.
+
 ## Resultados
 
 | Verificación | Resultado final |
 | --- | --- |
 | Instalación y actualización reales del addon | Correctas; modelos, ACL y vistas XML cargados |
-| Suite backend Odoo | **36 ejecutadas, 0 fallos, 0 errores** |
-| Pruebas unitarias JS de los parches de producción | **8 ejecutadas, 8 aprobadas** |
+| Suite backend Odoo | **51 ejecutadas, 0 fallos, 0 errores** |
+| Pruebas unitarias JS de los parches de producción | **16 ejecutadas, 16 aprobadas** |
 | Dos reservas en conexiones PostgreSQL concurrentes | **S/ 90 + S/ 10 = S/ 100**, con un reintento por serialización; fixtures limpiadas |
 | Chromium con assets y componentes OWL reales | Consulta DNI, reserva, pago y ticket aprobados; sin errores de runtime |
+| Desconexión antes y después del commit, con recarga | Ambos escenarios aprobados; un pedido, una línea de pago y un consumo |
 | Ticket de la venta de navegador | Original S/ 100, descuento S/ 15, total S/ 85; sin DNI completo |
 | Facturación estándar posterior al pago | Factura publicada, importe correcto y asientos balanceados; sin doble consumo |
 | Impuestos incluidos, excluidos y fijos | Aprobados en backend usando el motor fiscal de Odoo |
@@ -33,17 +52,18 @@ empleado inactivo/no autorizado, verificación presencial, agotamiento exacto,
 compras múltiples, cupo compartido entre sucursales, reservas y expiración,
 reintentos de sincronización, lunes de Lima, semanas sin consumo ni arrastre,
 cancelaciones, devoluciones completas/parciales y de semanas anteriores,
-manipulación de líneas/estados, reaplicación, impuestos y contabilidad.
+manipulación de líneas/estados, reaplicación, impuestos, cierre de caja, migración y contabilidad.
 
-Las ocho pruebas JS comprueban que el flujo no llega al cobro sin conexión o con
+Las dieciséis pruebas JS comprueban que el flujo no llega al cobro sin conexión o con
 rechazo del servidor, evita el fallback offline, invalida cambios del carrito,
 impide reemplazar manualmente el porcentaje, exige confirmación del servidor y
-consulta una respuesta de pago incierta antes de un segundo intento.
+consulta una respuesta de pago incierta antes de un segundo intento. Se valida
+retención en IndexedDB, ruta de recuperación y coordinación con sincronización
+en segundo plano usando el Mutex real de Odoo.
 
 Los scripts reproducibles están en `tools/`. Los logs de ejecución de esta máquina
-están fuera del repositorio: `/workspace/alvina-final-tests-3.log`,
-`/workspace/alvina-concurrency-final-2.log`, `/workspace/alvina-http-final.log` y
-`/workspace/alvina-install-final.log`. No se incluyen accesos temporales en Git.
+están fuera del repositorio: `/workspace/alvina-review-final-tests-5.log`,
+`/workspace/alvina-review-concurrency.log` y `/workspace/alvina-review-browser-suite-final.log`. No se incluyen accesos temporales en Git.
 
 ## Límites de esta validación
 
@@ -54,7 +74,7 @@ están fuera del repositorio: `/workspace/alvina-final-tests-3.log`,
   listas de precios, precios manuales y combos. Rebajas incorporadas al catálogo
   requieren control administrativo; no existe una marca estándar universal.
 - Las pruebas JS unitarias usan fronteras de red controladas. Se complementaron
-  con una venta real en Chromium, no con una simulación del POS completo.
+  con tres escenarios reales en Chromium, incluidos fallos de red y recarga.
 - La configuración del entorno se guardó como borrador (`install_script` y
   `start_skill`). Su publicación y restauración en una tarea nueva no se realizaron.
 - Se crea un commit local por solicitud del usuario. No se hace push automático.
@@ -66,6 +86,9 @@ están fuera del repositorio: `/workspace/alvina-final-tests-3.log`,
 ├── alvina_pos_employee_discount/
 │   ├── data/
 │   │   └── defaults.xml
+│   ├── migrations/
+│   │   └── 19.0.1.1.0/
+│   │       └── post-migrate.py
 │   ├── models/
 │   │   ├── __init__.py
 │   │   ├── employee_discount.py
@@ -78,7 +101,8 @@ están fuera del repositorio: `/workspace/alvina-final-tests-3.log`,
 │   │   └── security.xml
 │   ├── static/
 │   │   ├── description/
-│   │   │   └── icon.png
+│   │   │   ├── icon.png
+│   │   │   └── index.html
 │   │   └── src/
 │   │       └── app/
 │   │           ├── employee_discount.scss
@@ -99,8 +123,10 @@ están fuera del repositorio: `/workspace/alvina-final-tests-3.log`,
 │   ├── __init__.py
 │   └── __manifest__.py
 ├── tools/
+│   ├── browser_recovery.cjs
 │   ├── browser_smoke.cjs
 │   ├── prepare_browser_fixture.py
+│   ├── run_browser_tests.sh
 │   ├── run_odoo_tests.sh
 │   ├── test_concurrency.py
 │   ├── test_frontend.mjs

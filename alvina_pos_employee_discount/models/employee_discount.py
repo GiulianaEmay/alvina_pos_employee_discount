@@ -1,6 +1,6 @@
 """Private benefit ledger. Cashiers access only the narrow pos.order RPC surface."""
 from datetime import timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from zoneinfo import ZoneInfo
 
 from odoo import api, fields, models, _
@@ -49,10 +49,16 @@ class EmployeeDiscount(models.Model):
     @api.model
     def _policy(self):
         params = self.env['ir.config_parameter'].sudo()
-        rate = Decimal(params.get_param('alvina.discount_rate', '15'))
-        limit = Decimal(params.get_param('alvina.weekly_limit', '100'))
-        if not Decimal(0) < rate <= 15 or not Decimal(0) < limit <= 100:
-            raise UserError(_('Configuración de beneficio inválida: máximo 15 % y S/ 100.'))
+        try:
+            rate = Decimal(params.get_param('alvina.discount_rate', '15'))
+            limit = Decimal(params.get_param('alvina.weekly_limit', '100'))
+            valid = (rate.is_finite() and limit.is_finite()
+                     and Decimal(0) < rate <= 15 and Decimal(0) < limit <= 100
+                     and limit == limit.quantize(Decimal('0.01')))
+        except (InvalidOperation, ValueError, TypeError):
+            valid = False
+        if not valid:
+            raise UserError(_('Configuración inválida: máximo 15 % y S/ 100, con cupo de hasta dos decimales.'))
         return rate, limit
 
     @api.model
@@ -82,10 +88,19 @@ class EmployeeDiscount(models.Model):
 
     def _compute_balance(self):
         policy_rate, limit = self._policy()
-        week = self._week()
+        # Reporting must not lock employees or mutate expired reservations.
+        # Batch a single snapshot of active usage for all visible employees.
+        entries = self.sudo().search([
+            ('employee_id', 'in', self.employee_id.ids), ('week_start', '=', self._week()),
+            '|', ('state', '=', 'consumed'),
+            '&', ('state', '=', 'reserved'), ('expires_at', '>', fields.Datetime.now()),
+        ])
+        usage = {}
+        for entry in entries:
+            employee_id = entry.employee_id.id
+            usage[employee_id] = usage.get(employee_id, Decimal(0)) + Decimal(str(entry.amount)) - Decimal(str(entry.reversed_amount))
         for record in self:
-            self._lock_employee(record.employee_id)
-            record.balance = float(max(Decimal(0), limit - self._usage(record.employee_id, week)))
+            record.balance = float(max(Decimal(0), limit - usage.get(record.employee_id.id, Decimal(0))))
 
     def _release(self):
         for entry in self.sorted('employee_id'):
