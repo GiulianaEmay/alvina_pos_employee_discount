@@ -13,6 +13,7 @@ patch(ControlButtons.prototype, {
         return result;
     },
     alvinaDiscount() {
+        this.props.close?.();
         this.dialog.add(EmployeeDiscountPopup, { pos: this.pos, order: this.pos.getOrder() });
     },
 });

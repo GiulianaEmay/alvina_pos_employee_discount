@@ -2,7 +2,18 @@
 
 Revisión local del 30 de octubre de 2026, sobre la entrega inicial del addon.
 
-## Ajuste visual — 19.0.1.1.1
+## Acceso desde Acciones — 19.0.1.1.2
+
+Ajuste del 31 de octubre de 2026: **Descuento colaborador** aparece únicamente en
+**tres puntos → Acciones**, con icono de identificación y las clases nativas de
+las demás tarjetas. Se retiró de la barra principal y se quitó el estilo compacto
+anterior. Acciones se cierra al abrir la ventana del beneficio.
+
+Comprobado en Chromium: tarjeta de 310 × 124.25 px, idéntica a las tarjetas nativas
+en la misma ventana; sin desbordamiento. El flujo desde Acciones hasta el pago y
+el ticket también pasó: S/ 100 − S/ 15 = S/ 85.
+
+## Ajuste visual anterior — 19.0.1.1.1
 
 El botón se renombró a **Dscto. Colaborador**, con fuente de 14 px y texto en una
 sola línea. En Chromium a 1366 × 600 se comprobó un tamaño de 141 × 49 px,

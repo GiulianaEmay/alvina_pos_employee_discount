@@ -1,6 +1,6 @@
 {
     'name': 'ALVIÑA — Descuento de Colaboradores',
-    'version': '19.0.1.1.1',
+    'version': '19.0.1.1.2',
     'category': 'Sales/Point of Sale',
     'summary': 'Beneficio semanal centralizado de colaboradores, con reservas transaccionales',
     'author': 'ALVIÑA',

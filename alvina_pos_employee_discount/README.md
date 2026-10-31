@@ -1,6 +1,6 @@
 # ALVIÑA — Descuento de Colaboradores · Odoo 19
 
-Versión **19.0.1.1.1** · revisión de operación continua.
+Versión **19.0.1.1.2** · revisión de operación continua.
 
 Addon creado desde cero para `point_of_sale` + `hr`. No modifica el núcleo,
 no necesita repositorios privados ni librerías adicionales en producción.
@@ -58,7 +58,8 @@ Los scripts `tools/*fixture*` son exclusivamente para una base desechable.
 - Valores iniciales: 15 %, S/ 100 y America/Lima. El administrador puede reducir
   porcentaje/cupo dentro de estos máximos y habilitar cada POS. La política es
   global; nunca hay cupos diferentes por caja. La zona horaria se fija a Lima.
-- En productos: **Dscto. Colaborador**, DNI, **Consultar**, verificar al titular,
+- En productos: **tres puntos → Acciones → Descuento colaborador**, DNI,
+  **Consultar**, verificar al titular,
   marcar la confirmación y **APLICAR DESCUENTO**. El total cambia inmediatamente.
 - La reserva dura **10 minutos**. Repetir la aplicación sobre el mismo pedido
   actualiza la misma operación. **Cancelar** cierra la ventana; **Retirar beneficio**
